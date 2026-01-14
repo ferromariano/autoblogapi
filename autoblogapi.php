@@ -122,12 +122,19 @@ if (!class_exists('Auto_Blog_API')) {
             foreach ($remote_posts as $remote_post) {
                 $guid = $this->extract_guid($remote_post);
                 $title = $this->extract_title($remote_post);
+                $tax_input = $this->prepare_terms($remote_post);
 
-                if ($this->post_exists($guid, $title)) {
+                $existing_id = $this->find_existing_post($guid, $title);
+                if ($existing_id > 0) {
+                    $this->sync_terms_with_post($existing_id, $tax_input);
+                    if ($guid !== '') {
+                        update_post_meta($existing_id, self::META_KEY, $guid);
+                    }
+                    update_post_meta($existing_id, self::FLAG_META_KEY, '1');
+                    $this->log_post_details($existing_id, $remote_post);
                     continue;
                 }
 
-                $tax_input = $this->prepare_terms($remote_post);
                 $post_id = $this->insert_post($remote_post, $admin_id, $title, $tax_input);
                 if (!$post_id || is_wp_error($post_id)) {
                     continue;
@@ -136,6 +143,7 @@ if (!class_exists('Auto_Blog_API')) {
                 $this->handle_featured_media($post_id, $remote_post);
                 add_post_meta($post_id, self::META_KEY, $guid, true);
                 add_post_meta($post_id, self::FLAG_META_KEY, '1', true);
+                $this->sync_terms_with_post($post_id, $tax_input);
                 $this->log_post_details($post_id, $remote_post);
             }
 
@@ -208,13 +216,13 @@ if (!class_exists('Auto_Blog_API')) {
         }
 
         /**
-         * Verifica si la entrada ya existe mediante el GUID o el título.
+         * Devuelve el identificador de una entrada previamente importada buscando por GUID o título.
          *
          * @param string $guid GUID remoto saneado.
          * @param string $title Título remoto saneado.
-         * @return bool Verdadero si ya se importó la entrada.
+         * @return int ID de la entrada existente o 0 si no se encuentra.
          */
-        private function post_exists(string $guid, string $title): bool {
+        private function find_existing_post(string $guid, string $title): int {
             if ($guid !== '') {
                 $existing = get_posts([
                     'post_type' => 'post',
@@ -226,7 +234,7 @@ if (!class_exists('Auto_Blog_API')) {
                 ]);
 
                 if (!empty($existing)) {
-                    return true;
+                    return (int) $existing[0];
                 }
             }
 
@@ -235,13 +243,13 @@ if (!class_exists('Auto_Blog_API')) {
                     require_once ABSPATH . 'wp-admin/includes/post.php';
                 }
 
-                $post_id = post_exists($title, '', '', 'post');
-                if ($post_id && $post_id > 0) {
-                    return true;
+                $post_id = (int) post_exists($title, '', '', 'post');
+                if ($post_id > 0) {
+                    return $post_id;
                 }
             }
 
-            return false;
+            return 0;
         }
 
         /**
@@ -369,6 +377,20 @@ if (!class_exists('Auto_Blog_API')) {
             }
 
             return $names;
+        }
+
+        /**
+         * Sincroniza categorías y etiquetas de una entrada local con la información remota preparada.
+         *
+         * @param int $post_id Identificador de la entrada local a actualizar.
+         * @param array $tax_input Datos de taxonomías devueltos por prepare_terms.
+         */
+        private function sync_terms_with_post(int $post_id, array $tax_input): void {
+            $categories = isset($tax_input['category']) ? array_values(array_unique(array_map('intval', $tax_input['category']))) : [];
+            $tags = isset($tax_input['post_tag']) ? array_values(array_unique(array_map('intval', $tax_input['post_tag']))) : [];
+
+            wp_set_post_terms($post_id, $categories, 'category', false);
+            wp_set_post_terms($post_id, $tags, 'post_tag', false);
         }
 
         /**
